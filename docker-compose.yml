@@ -1,0 +1,168 @@
+version: '3.7'
+
+services:
+  # PostgreSQL para Airflow (metadatos)
+  postgres-airflow:
+    image: postgres:15
+    container_name: pedrozoetl-postgres-airflow
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_airflow_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    restart: always
+    networks:
+      - airflow-network
+
+  # PostgreSQL para Datos de Calidad del Agua
+  postgres-waterdb:
+    image: postgres:15
+    container_name: pedrozoetl-postgres-waterdb
+    environment:
+      POSTGRES_USER: wateruser
+      POSTGRES_PASSWORD: waterpass
+      POSTGRES_DB: water_quality_db
+    ports:
+      - "5433:5432"  # Puerto diferente para evitar conflicto
+    volumes:
+      - postgres_water_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql  # Script de inicialización
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "wateruser", "-d", "water_quality_db"]
+      interval: 5s
+      retries: 5
+    restart: always
+    networks:
+      - airflow-network
+
+  airflow-init:
+    image: apache/airflow:2.7.1
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: 'XfJw8Hf5YzR4KvN2PqL9MxB7GtC3DnE6=Zk8Jh4Fg1Qs2'
+      PYTHONPATH: '/opt/airflow'
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy
+      postgres-waterdb:
+        condition: service_healthy
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./data:/opt/airflow/data
+      - ./scripts:/opt/airflow/scripts
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "Inicializando base de datos de Airflow..."
+        airflow db migrate
+        echo "Creando usuario admin..."
+        airflow users create --username admin --firstname Gerardo --lastname Hernandez --role Admin --email admin@example.com --password admin || echo "Usuario ya existe"
+        echo "Inicialización completada"
+    networks:
+      - airflow-network
+
+  airflow-webserver:
+    image: apache/airflow:2.7.1
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: 'XfJw8Hf5YzR4KvN2PqL9MxB7GtC3DnE6=Zk8Jh4Fg1Qs2'
+      AIRFLOW__WEBSERVER__SECRET_KEY: 'my_secret_key_for_dev'
+      PYTHONPATH: '/opt/airflow'
+      # Variables de conexión a la BD de datos
+      WATER_DB_HOST: postgres-waterdb
+      WATER_DB_PORT: 5432
+      WATER_DB_NAME: water_quality_db
+      WATER_DB_USER: wateruser
+      WATER_DB_PASSWORD: waterpass
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy
+      postgres-waterdb:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./data:/opt/airflow/data
+      - ./scripts:/opt/airflow/scripts
+      - ./logs:/opt/airflow/logs
+    command: webserver
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - airflow-network
+
+  airflow-scheduler:
+    image: apache/airflow:2.7.1
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: 'XfJw8Hf5YzR4KvN2PqL9MxB7GtC3DnE6=Zk8Jh4Fg1Qs2'
+      PYTHONPATH: '/opt/airflow'
+      # Variables de conexión a la BD de datos
+      WATER_DB_HOST: postgres-waterdb
+      WATER_DB_PORT: 5432
+      WATER_DB_NAME: water_quality_db
+      WATER_DB_USER: wateruser
+      WATER_DB_PASSWORD: waterpass
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy
+      postgres-waterdb:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./data:/opt/airflow/data
+      - ./scripts:/opt/airflow/scripts
+      - ./logs:/opt/airflow/logs
+    command: scheduler
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - airflow-network
+
+  # Adminer - Herramienta para visualizar las bases de datos
+  adminer:
+    image: adminer
+    container_name: pedrozoetl-adminer
+    restart: always
+    ports:
+      - "8081:8080"
+    networks:
+      - airflow-network
+    depends_on:
+      - postgres-airflow
+      - postgres-waterdb
+
+volumes:
+  postgres_airflow_data:
+  postgres_water_data:
+
+networks:
+  airflow-network:
+    driver: bridge
